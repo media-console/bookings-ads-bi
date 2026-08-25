@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ads BI - Destination Performance</title>
+<title>Ads BI — Destination Performance</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -2384,7 +2384,12 @@ function runCompare(){
     {key:'roas', label:'ROAS', fmt:v=>fmtRatio2(v), get:(m,r)=>r.roas, lowerBetter:false},
   ];
 
-  const computed = found.map(f=>({label:f.label, rates:deriveRates(f.m), m:f.m}));
+  const computed = found.map(f=>({
+    label:f.label,
+    rates:deriveRates(f.m),
+    m:f.m,
+    monthlyRevenue: realMonthlyRevenueForHotelDim(f.label, dim, isCamp, currentDest)
+  }));
   const bestByMetric = {};
   metricDefs.forEach(md=>{
     const vals = computed.map(c=>md.get(c.m, c.rates));
@@ -2405,31 +2410,31 @@ function runCompare(){
   renderCompareChart(computed);
 }
 
-function monthsInRange(start, end){
-  const months = [];
-  let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
-  const endCursor = new Date(end.getFullYear(), end.getMonth(), 1);
-  let guard = 0;
-  while(cursor <= endCursor && guard < 36){
-    months.push({ short: cursor.toLocaleString('en-US',{month:'short'}), year: cursor.getFullYear() });
-    cursor = new Date(cursor.getFullYear(), cursor.getMonth()+1, 1);
-    guard++;
-  }
-  if(months.length===0){
-    months.push({ short: start.toLocaleString('en-US',{month:'short'}), year: start.getFullYear() });
-  }
-  return months;
-}
-
-function seededRand(str, i){
-  let h=0; for(let k=0;k<str.length;k++){ h = (h*31 + str.charCodeAt(k) + i*97) % 100000; }
-  return (h % 1000) / 1000;
-}
-function monthlyRevenueSeries(label, totalRevenue, monthCount){
-  const weights = [];
-  for(let i=0;i<monthCount;i++){ weights.push(0.6 + seededRand(label, i)*0.8); }
-  const sum = weights.reduce((a,b)=>a+b,0);
-  return weights.map(w => (w/sum) * totalRevenue);
+/** Real month-by-month revenue for one hotel, scoped to the Compare feature's selected Campaign (channel) or GEO dimension. Returns a Map<"YYYY-MM", revenue>. */
+function realMonthlyRevenueForHotelDim(hotelName, dim, isCamp, dest){
+  const hotels = isCamp ? getHotelsForAgg(dest) : getHotelsForGeoAgg(dest);
+  const hotel = hotels.find(h => h.name.toLowerCase() === hotelName.toLowerCase());
+  const acc = new Map();
+  if(!hotel) return acc;
+  hotel.campaigns.forEach(c=>{
+    if(isCamp){
+      if(c.channel.toLowerCase() !== dim.toLowerCase()) return;
+      Object.keys(c.geo).forEach(g=>{
+        Object.keys(c.geo[g]).forEach(mk=>{
+          if(mk === 'unknown') return;
+          acc.set(mk, (acc.get(mk)||0) + c.geo[g][mk].revenue);
+        });
+      });
+    } else {
+      const geoBucket = Object.keys(c.geo).find(g => g.toLowerCase() === dim.toLowerCase());
+      if(!geoBucket) return;
+      Object.keys(c.geo[geoBucket]).forEach(mk=>{
+        if(mk === 'unknown') return;
+        acc.set(mk, (acc.get(mk)||0) + c.geo[geoBucket][mk].revenue);
+      });
+    }
+  });
+  return acc;
 }
 
 function fmtCompact(n){
@@ -2498,13 +2503,19 @@ function donutRowHtml(cards){
 
 function renderCompareChart(computed){
   const colors = ['#3D5AFE','#1AAB40','#D64550','#744EC2','#197278'];
-  const monthsArr = monthsInRange(dateRangeStart, dateRangeEnd);
-  const labels = monthsArr.map(m => m.short+' '+m.year);
+
+  // Real months: the union of every month key that actually has data across
+  // all compared hotels for this dimension, sorted chronologically — not a
+  // fabricated 36-month window from a hardcoded start date.
+  const monthKeySet = new Set();
+  computed.forEach(c => c.monthlyRevenue.forEach((v,mk)=>monthKeySet.add(mk)));
+  const monthKeys = Array.from(monthKeySet).sort((a,b)=>a.localeCompare(b));
+  const labels = monthKeys.map(formatMonthLabel);
 
   const titleEl = document.getElementById('compareChartTitle');
   if(titleEl){
-    titleEl.textContent = labels.length>1
-      ? `REVENUE TREND (${labels[0]} – ${labels[labels.length-1]})`
+    titleEl.textContent = labels.length===0 ? 'REVENUE TREND (no monthly data)'
+      : labels.length>1 ? `REVENUE TREND (${labels[0]} – ${labels[labels.length-1]})`
       : `REVENUE TREND (${labels[0]})`;
   }
 
@@ -2512,7 +2523,7 @@ function renderCompareChart(computed){
     const color = colors[i % colors.length];
     return {
       label: c.label,
-      data: monthlyRevenueSeries(c.label, c.m.revenue, monthsArr.length),
+      data: monthKeys.map(mk => c.monthlyRevenue.get(mk) || 0),
       borderColor: color,
       backgroundColor: color+'1A',
       fill: false,
