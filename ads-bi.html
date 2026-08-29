@@ -1030,6 +1030,8 @@ body {
         </div>
       </div>
 
+      <div id="dateRangeNotice" style="display:none;margin:-4px 0 18px;padding:12px 16px;border:1px solid #f2d28b;background:#fff9e8;color:#775b16;border-radius:14px;font-size:13px;line-height:1.5;"></div>
+
       <div class="kpi-grid" style="grid-template-columns:repeat(5,minmax(0,1fr));" id="kpiRow"></div>
 
       <div class="card">
@@ -1087,7 +1089,16 @@ body {
 
 <script>
 /* ============ date range picker ============ */
-const TODAY = new Date(2026,6,31); // 31 Jul 2026
+// Business reporting follows Bangkok time. Historical Ads data is monthly
+// through Jul 2026; the Aggregated feed is daily from 01 Aug 2026 onward.
+const DAILY_DATA_START = new Date(2026,7,1);
+function todayInBangkok(){
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone:'Asia/Bangkok', year:'numeric', month:'2-digit', day:'2-digit'
+  }).formatToParts(new Date()).reduce((acc,p)=>{ acc[p.type]=p.value; return acc; },{});
+  return new Date(Number(parts.year), Number(parts.month)-1, Number(parts.day));
+}
+const TODAY = todayInBangkok();
 function fmtD(d){ const dd=String(d.getDate()).padStart(2,'0'); const mm=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]; return `${dd} ${mm} ${d.getFullYear()}`; }
 function fmtSlash(d){ const dd=String(d.getDate()).padStart(2,'0'); const mm=String(d.getMonth()+1).padStart(2,'0'); return `${dd}/${mm}/${d.getFullYear()}`; }
 function addDays(d,n){ const r=new Date(d); r.setDate(r.getDate()+n); return r; }
@@ -1209,6 +1220,7 @@ function shiftCalMonth(dir){
 function applyDateRange(){
   document.getElementById('dateRangeInput').value = activePreset==='alltime' ? 'All Time' : `${fmtD(dateRangeStart)} - ${fmtD(dateRangeEnd)}`;
   document.getElementById('datePanel').style.display = 'none';
+  renderDateRangeNotice();
   if(typeof renderAll === 'function') renderAll();
   else if(typeof runCompare === 'function') runCompare();
 }
@@ -1229,7 +1241,7 @@ let geos = [];        // populated from real data after fetch
 let currentObjective = "all"; // all | Branding | Conversion
 
 let rawData = {}; // { destination: { hotels: [ { name, campaigns:[ {channel, objective, geo:{GEOCODE:{monthKey:{spend,impr,clicks,conv,revenue}}}} ] } ] } } — built from "Aggregated" (Raw Import - Ads): accurate daily totals, coarse/no real GEO.
-let geoRawData = {}; // same shape, built from "Geo Detail" (Raw Import - Geos): accurate per-country GEO, monthly resolution. Used only by Geo Overview / Hotel vs GEO / Geo vs Campaign.
+let geoRawData = {}; // same shape, built from "Geo Detail" (Raw Import - Geos): accurate per-country GEO, monthly through Jul 2026 and daily from Aug. Used by GEO-related views.
 
 /**
  * Shared row->tree builder used for both the Aggregated feed and the Geo
@@ -1264,10 +1276,10 @@ function buildDestTree(rowList){
     const campKey = channel + '||' + objective;
     if(!hotelEntry.campaignMap.has(campKey)) hotelEntry.campaignMap.set(campKey, { channel, objective, geo:{} });
     const camp = hotelEntry.campaignMap.get(campKey);
-    const monthKey = normalizeMonthKey(row['Month']);
+    const periodKey = normalizePeriodKey(row['Date'] || row['Day'] || row['Month']);
     if(!camp.geo[geo]) camp.geo[geo] = {};
-    if(!camp.geo[geo][monthKey]) camp.geo[geo][monthKey] = {spend:0, impr:0, clicks:0, videoViews:0, completedViews:0, conv:0, revenue:0, nativeSpend:0, nativeRevenue:0, currency:''};
-    const bucket = camp.geo[geo][monthKey];
+    if(!camp.geo[geo][periodKey]) camp.geo[geo][periodKey] = {spend:0, impr:0, clicks:0, videoViews:0, completedViews:0, conv:0, revenue:0, nativeSpend:0, nativeRevenue:0, currency:''};
+    const bucket = camp.geo[geo][periodKey];
     bucket.spend += pickNumField(row, ['Ad Spend (THB)','Ad Spend']);
     bucket.impr += Number(row['Impressions'])||0;
     bucket.clicks += Number(row['Clicks'])||0;
@@ -1316,16 +1328,24 @@ function buildDestTree(rowList){
  * the recovered month doesn't depend on whatever timezone the viewer's own
  * browser happens to be in.
  */
-function normalizeMonthKey(raw){
+function normalizePeriodKey(raw){
   if(!raw) return 'unknown';
   const str = String(raw).trim();
-  if(/^\d{4}-\d{2}$/.test(str)) return str; // already clean
+  if(/^\d{4}-\d{2}$/.test(str)) return str; // explicit monthly row
+  if(/^\d{4}-\d{2}-\d{2}$/.test(str)){
+    const [y,m,d] = str.split('-').map(Number);
+    const parsed = new Date(y,m-1,d);
+    if(parsed < DAILY_DATA_START) return str.slice(0,7);
+    return str;
+  }
   const d = new Date(str);
   if(isNaN(d.getTime())) return 'unknown';
   const bangkok = new Date(d.getTime() + 7*60*60*1000);
   const y = bangkok.getUTCFullYear();
   const m = String(bangkok.getUTCMonth()+1).padStart(2,'0');
-  return `${y}-${m}`;
+  const day = String(bangkok.getUTCDate()).padStart(2,'0');
+  const parsed = new Date(y, Number(m)-1, Number(day));
+  return parsed < DAILY_DATA_START ? `${y}-${m}` : `${y}-${m}-${day}`;
 }
 /** "2026-06" -> "Jun 2026" for display. Sorting should always use the raw "YYYY-MM" key, not this. */
 function formatMonthLabel(monthKey){
@@ -1384,11 +1404,8 @@ function loadRealData(){
         rawData = adsResult.tree;
         channels = adsResult.channels;
 
-        // Geo Detail (from "Raw Import - Geos") has the real per-country
-        // breakdown; Aggregated (from "Raw Import - Ads") mostly won't. Build
-        // a SEPARATE tree from it so Geo-related view modes (Geo Overview,
-        // Hotel vs GEO, Geo vs Campaign) can read real geo data, while
-        // Campaign-only view modes keep reading the daily-accurate rawData.
+        // Geo Detail has the real per-country breakdown. It follows the same
+        // period granularity as Ads: monthly through Jul 2026, daily from Aug.
         const geoResult = buildDestTree(data.geoRows || []);
         geoRawData = geoResult.tree;
         geos = geoResult.geos.length ? geoResult.geos : adsResult.geos;
@@ -1478,16 +1495,49 @@ function fmtNum(n){ return Math.round(n).toLocaleString('en-US', {maximumFractio
 function fmtPercent2(n){ return n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})+'%'; }
 function fmtRatio2(n){ return n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}); }
 
-/** monthKey is 'YYYY-MM' (or 'unknown' for rows the Sheet couldn't date). */
-function isMonthInRange(monthKey){
-  if(monthKey === 'unknown') return true; // don't silently drop undated rows
-  const parts = monthKey.split('-').map(Number);
-  const y = parts[0], m = parts[1];
-  if(!y || !m) return true;
-  const d = new Date(y, m-1, 1);
-  const startMonth = new Date(dateRangeStart.getFullYear(), dateRangeStart.getMonth(), 1);
-  const endMonth = new Date(dateRangeEnd.getFullYear(), dateRangeEnd.getMonth(), 1);
-  return d >= startMonth && d <= endMonth;
+function isSameDay(a,b){
+  return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate();
+}
+function periodMonthKey(periodKey){ return periodKey === 'unknown' ? 'unknown' : periodKey.slice(0,7); }
+/** Daily keys are filtered by exact date. Monthly keys are included only when
+ * the selected range covers the complete month. The one exception is the
+ * current month in This Month, whose monthly GEO bucket is month-to-date. */
+function isPeriodInRange(periodKey){
+  if(periodKey === 'unknown') return true; // retain undated rows rather than silently losing spend
+  if(/^\d{4}-\d{2}-\d{2}$/.test(periodKey)){
+    const [y,m,d] = periodKey.split('-').map(Number);
+    const day = new Date(y,m-1,d);
+    return day >= dateRangeStart && day <= dateRangeEnd;
+  }
+  if(/^\d{4}-\d{2}$/.test(periodKey)){
+    const [y,m] = periodKey.split('-').map(Number);
+    const monthStart = new Date(y,m-1,1);
+    const monthEnd = endOfMonth(monthStart);
+    const fullyCovered = dateRangeStart <= monthStart && dateRangeEnd >= monthEnd;
+    const currentMonthToDate = activePreset === 'thismonth' &&
+      monthStart.getFullYear() === TODAY.getFullYear() && monthStart.getMonth() === TODAY.getMonth();
+    return fullyCovered || currentMonthToDate;
+  }
+  return true;
+}
+function historicalPartialMonthMessage(){
+  if(activePreset === 'alltime') return '';
+  const historicalEnd = addDays(DAILY_DATA_START,-1);
+  if(dateRangeStart > historicalEnd) return '';
+  const coveredEnd = dateRangeEnd < historicalEnd ? dateRangeEnd : historicalEnd;
+  const partialStart = dateRangeStart.getDate() !== 1;
+  const partialEnd = !isSameDay(coveredEnd, endOfMonth(coveredEnd));
+  if(!partialStart && !partialEnd) return '';
+  return `Daily data is available from ${fmtD(DAILY_DATA_START)}. Partial months before this date are excluded because Jan–Jul 2026 contains monthly totals only.`;
+}
+function renderDateRangeNotice(){
+  const el = document.getElementById('dateRangeNotice');
+  if(!el) return;
+  const messages = [];
+  const historicalMessage = historicalPartialMonthMessage();
+  if(historicalMessage) messages.push(historicalMessage);
+  el.textContent = messages.join(' ');
+  el.style.display = messages.length ? 'block' : 'none';
 }
 
 /**
@@ -1503,10 +1553,11 @@ function aggByMonthGeneric(hotels, campaignFilterFn, geoFilter){
     if(campaignFilterFn && !campaignFilterFn(c)) return;
     Object.keys(c.geo).forEach(g => {
       if(geoFilter && g !== geoFilter) return;
-      Object.keys(c.geo[g]).forEach(mk => {
-        if(mk === 'unknown') return; // no real date — doesn't belong on a monthly trend
+      Object.keys(c.geo[g]).forEach(periodKey => {
+        if(periodKey === 'unknown') return; // no real date — doesn't belong on a monthly trend
+        const mk = periodMonthKey(periodKey);
         if(!acc[mk]) acc[mk] = [];
-        acc[mk].push(c.geo[g][mk]);
+        acc[mk].push(c.geo[g][periodKey]);
       });
     });
   }));
@@ -1518,7 +1569,7 @@ function aggByMonthGeneric(hotels, campaignFilterFn, geoFilter){
 
 /** Collapses a {monthKey: metrics} map down to one flat metrics object, summing only months inside the currently selected Date Range. */
 function geoInRange(monthMap){
-  return sumMetrics(Object.keys(monthMap).filter(isMonthInRange).map(mk=>monthMap[mk]));
+  return sumMetrics(Object.keys(monthMap).filter(isPeriodInRange).map(k=>monthMap[k]));
 }
 
 /** Combines several {monthKey: metrics} maps into one chronological per-month
@@ -1526,10 +1577,11 @@ function geoInRange(monthMap){
 function monthlyBreakdown(monthMapsList){
   const acc = {};
   monthMapsList.forEach(monthMap=>{
-    Object.keys(monthMap).forEach(mk=>{
-      if(mk === 'unknown' || !isMonthInRange(mk)) return;
+    Object.keys(monthMap).forEach(periodKey=>{
+      if(periodKey === 'unknown' || !isPeriodInRange(periodKey)) return;
+      const mk = periodMonthKey(periodKey);
       if(!acc[mk]) acc[mk] = [];
-      acc[mk].push(monthMap[mk]);
+      acc[mk].push(monthMap[periodKey]);
     });
   });
   return Object.keys(acc).sort().map(mk=>({month:mk, m:sumMetrics(acc[mk])}));
@@ -2420,17 +2472,19 @@ function realMonthlyRevenueForHotelDim(hotelName, dim, isCamp, dest){
     if(isCamp){
       if(c.channel.toLowerCase() !== dim.toLowerCase()) return;
       Object.keys(c.geo).forEach(g=>{
-        Object.keys(c.geo[g]).forEach(mk=>{
-          if(mk === 'unknown') return;
-          acc.set(mk, (acc.get(mk)||0) + c.geo[g][mk].revenue);
+        Object.keys(c.geo[g]).forEach(periodKey=>{
+          if(periodKey === 'unknown') return;
+          const mk = periodMonthKey(periodKey);
+          acc.set(mk, (acc.get(mk)||0) + c.geo[g][periodKey].revenue);
         });
       });
     } else {
       const geoBucket = Object.keys(c.geo).find(g => g.toLowerCase() === dim.toLowerCase());
       if(!geoBucket) return;
-      Object.keys(c.geo[geoBucket]).forEach(mk=>{
-        if(mk === 'unknown') return;
-        acc.set(mk, (acc.get(mk)||0) + c.geo[geoBucket][mk].revenue);
+      Object.keys(c.geo[geoBucket]).forEach(periodKey=>{
+        if(periodKey === 'unknown') return;
+        const mk = periodMonthKey(periodKey);
+        acc.set(mk, (acc.get(mk)||0) + c.geo[geoBucket][periodKey].revenue);
       });
     }
   });
@@ -2603,6 +2657,7 @@ async function init(){
     populateDestSelect();
     populateHotelFilter();
     populateCampaignFilter();
+    renderDateRangeNotice();
     renderAll();
   }catch(err){
     container.innerHTML = `<div style="padding:40px 20px;text-align:center;color:#8a96aa;">
