@@ -175,6 +175,10 @@
   .bi-content{width:100%}
   .bi-page{display:none}
   .bi-page.active{display:block}
+  .pipeline-year-bar{display:flex;justify-content:flex-end;align-items:end;margin:0 0 14px}
+  .pipeline-year-control{display:flex;flex-direction:column;gap:6px;min-width:150px}
+  .pipeline-year-control label{font-size:11px;font-weight:800;letter-spacing:.08em;color:#7b8798;text-transform:uppercase}
+  .pipeline-year-control select{height:40px;min-width:150px;border-radius:12px;font-weight:700}
   @media(max-width:900px){.bi-tabs{gap:18px}}
   .matrix-hint{font-size:12px;color:var(--pbi-text-sub);font-weight:600;white-space:nowrap;align-self:flex-end;padding-bottom:2px}
   .month-th{cursor:pointer;user-select:none;transition:background .12s,color .12s}
@@ -530,6 +534,9 @@
               </div>
             </div>
             <div class="bi-page" data-page="pipeline">
+              <div class="pipeline-year-bar">
+                <div class="pipeline-year-control"><label for="pipelineStayYear">Stay Year</label><select id="pipelineStayYear" onchange="setPipelineStayYear(this.value)"></select></div>
+              </div>
               <div class="grid-2">
                 <div class="card"><div class="card-head"><div><div class="card-kicker">Revenue Contribution</div><div class="card-title">Revenue by Check-in Month</div></div></div><div class="chart-box"><canvas id="futureRevenueChart"></canvas></div><div class="insight-callout" id="pipelineInsight"></div></div>
                 <div class="card"><div class="card-head"><div><div class="card-kicker">Room Night Contribution</div><div class="card-title">Room Nights by Check-in Month</div></div></div><div class="chart-box"><canvas id="roomNightsChart"></canvas></div><div class="insight-callout" id="roomNightsInsight"></div></div>
@@ -601,6 +608,7 @@ let charts = {};
 let hoverCharts = {};
 let currentSourceRows = [];
 let currentView = null;
+let selectedStayYear = '';
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', function () {
@@ -717,6 +725,25 @@ function setupFilters() {
   if (marketOptions) {
     marketOptions.innerHTML = markets.map(v => '<option value="' + escapeAttr(v) + '"></option>').join('');
   }
+  setupStayYearControls();
+}
+
+function getRowStayYear(r){ return String((r && r['Stay Year']) || '').trim(); }
+function getAvailableStayYears(){
+  const rows=(payload.futurePipeline||[]).concat(payload.destinationFuturePipeline||[],payload.futureSourceMarket||[],payload.destinationFutureSourceMarket||[]);
+  return unique(rows.map(getRowStayYear).filter(y=>/^\d{4}$/.test(y))).sort((a,b)=>Number(a)-Number(b));
+}
+function setupStayYearControls(){
+  const years=getAvailableStayYears(), current=String(new Date().getFullYear());
+  if(!selectedStayYear||!years.includes(selectedStayYear)) selectedStayYear=years.includes(current)?current:(years[0]||'');
+  if(!onePagerStayYear||!years.includes(onePagerStayYear)) onePagerStayYear=selectedStayYear||(years[0]||'');
+  const select=document.getElementById('pipelineStayYear');
+  if(select){select.innerHTML=years.map(y=>'<option value="'+escapeAttr(y)+'"'+(y===selectedStayYear?' selected':'')+'>'+escapeHtml(y)+'</option>').join('');select.disabled=!years.length;}
+}
+function setPipelineStayYear(year){
+  selectedStayYear=String(year||'');
+  highlightedMatrixMonths=[];matrixShowAll=false;
+  render();
 }
 
 let renderDebounceTimer = null;
@@ -758,15 +785,15 @@ function getFilteredView() {
   if (dest) {
     monthlyRows = (payload.destinationMonth || []).filter(r => r.Destination === dest && (!selectedMonths.length || selectedMonths.includes(r.Month)));
     sourceRows = (payload.destinationSourceMarketMonth || []).filter(r => r.Destination === dest && (!selectedMonths.length || selectedMonths.includes(r.Month))).map(toSourceRow);
-    futureRows = (payload.destinationFuturePipeline || []).filter(r => r.Destination === dest).map(toFutureRow);
+    futureRows = (payload.destinationFuturePipeline || []).filter(r => r.Destination === dest && (!selectedStayYear || getRowStayYear(r)===selectedStayYear)).map(toFutureRow);
   } else if (selectedMonths.length) {
     monthlyRows = (payload.monthly || []).filter(r => selectedMonths.includes(r.Month));
     sourceRows = (payload.sourceMarketMonth || []).filter(r => selectedMonths.includes(r.Month)).map(toSourceRow);
-    futureRows = (payload.futurePipeline || []).map(toFutureRow);
+    futureRows = (payload.futurePipeline || []).filter(r => !selectedStayYear || getRowStayYear(r)===selectedStayYear).map(toFutureRow);
   } else {
     monthlyRows = (payload.monthly || []);
     sourceRows = (payload.sourceMarket || []).map(toSourceRow);
-    futureRows = (payload.futurePipeline || []).map(toFutureRow);
+    futureRows = (payload.futurePipeline || []).filter(r => !selectedStayYear || getRowStayYear(r)===selectedStayYear).map(toFutureRow);
   }
   sourceRows = combineSourceRows(sourceRows).sort((a,b)=>b.revenue-a.revenue);
   const totals = rowsToTotals(monthlyRows);
@@ -774,7 +801,7 @@ function getFilteredView() {
 }
 
 function toSourceRow(r){ return { market: r['Source Market'], revenue: numVal(r.Revenue), nights: numVal(r['Room Nights']), bookings: numVal(r.Bookings), abv: numVal(r['Avg Booking Value']), los: numVal(r['Avg LOS']), blt: numVal(r['Avg BLT']) }; }
-function toFutureRow(r){ return { month: r['Check-in Month'], revenue: numVal(r.Revenue), nights: numVal(r['Room Nights']), bookings: numVal(r.Bookings) }; }
+function toFutureRow(r){ return { year:getRowStayYear(r), month:r['Check-in Month'], revenue:numVal(r.Revenue), nights:numVal(r['Room Nights']), bookings:numVal(r.Bookings) }; }
 function combineSourceRows(rows){
   const map = {};
   rows.forEach(r => { const k = r.market||'Unknown'; if(!map[k]) map[k]={market:k,revenue:0,nights:0,bookings:0,bltTotal:0}; map[k].revenue+=r.revenue||0; map[k].nights+=r.nights||0; map[k].bookings+=r.bookings||0; map[k].bltTotal+=(r.blt||0)*(r.bookings||0); });
@@ -894,7 +921,7 @@ function computeUpcoming3Insight(upcoming3){
   const total=upcoming3.reduce((s,r)=>s+r.revenue,0);
   if(!total)return'';
   const top=upcoming3.slice().sort((a,b)=>b.revenue-a.revenue)[0],share=top.revenue/total*100;
-  return'<b>'+top.month+'</b> is the strongest month in the pipeline ahead, carrying <b>'+share.toFixed(0)+'%</b> of next-3-month revenue on books ('+formatRevenue(top.revenue)+' of '+formatRevenue(total)+').';
+  return'<b>'+pipelinePeriodLabel(top)+'</b> is the strongest month in the pipeline ahead, carrying <b>'+share.toFixed(0)+'%</b> of next-3-month revenue on books ('+formatRevenue(top.revenue)+' of '+formatRevenue(total)+').';
 }
 function computeMarketModeActionPlan(revenueHeatmap, marketName){
   if(!revenueHeatmap||!revenueHeatmap.rows.length) return 'Add a recommended next step based on the pipeline above.';
@@ -914,11 +941,12 @@ function computePipelineActionPlan(revenueHeatmap, upcoming3, sourceRows, overal
   const abvByMarket={};
   (sourceRows||[]).forEach(r=>{abvByMarket[r.market]=r.abv;});
 
-  const periodAbbrs=upcoming3.map(r=>String(r.month||'').slice(0,3));
-  const periodLabel=periodAbbrs.length>1?(periodAbbrs[0]+'\u2013'+periodAbbrs[periodAbbrs.length-1]):periodAbbrs[0];
+  const periodLabels=upcoming3.map(pipelinePeriodLabel);
+  const periodLabel=periodLabels.length>1?(periodLabels[0]+'\u2013'+periodLabels[periodLabels.length-1]):periodLabels[0];
 
-  const now=new Date();
-  const windowEnd=new Date(now.getFullYear(), now.getMonth()+upcoming3.length, 0);
+  const now=new Date(),lastPeriod=upcoming3[upcoming3.length-1];
+  const lastMonthIndex=MONTH_ABBR.indexOf(String(lastPeriod.month||'').slice(0,3));
+  const windowEnd=new Date(Number(lastPeriod.year)||now.getFullYear(),lastMonthIndex+1,0);
   const daysUntilWindowEnd=Math.max(1,Math.ceil((windowEnd-now)/86400000));
 
   const withStats=revenueHeatmap.rows.map(r=>({market:r.market,total:r.total,blt:bltByMarket[r.market]||0,abv:abvByMarket[r.market]||0}));
@@ -943,7 +971,7 @@ function computePipelineInsight(rows){
   const total=rows.reduce((s,r)=>s+r.revenue,0);
   if(!total)return'';
   const top=rows.slice().sort((a,b)=>b.revenue-a.revenue)[0],share=top.revenue/total*100;
-  return'<b>'+top.month+'</b> is the single largest booking window ahead, carrying <b>'+share.toFixed(0)+'%</b> of total future pipeline revenue ('+formatRevenue(top.revenue)+' of '+formatRevenue(total)+').';
+  return'<b>'+top.month+(top.year?' '+top.year:'')+'</b> is the single largest booking window ahead, carrying <b>'+share.toFixed(0)+'%</b> of total future pipeline revenue ('+formatRevenue(top.revenue)+' of '+formatRevenue(total)+').';
 }
 function computeMarketConcentrationInsight(rows){
   if(!rows||!rows.length)return'';
@@ -1352,7 +1380,7 @@ function createHoverChart(id,config){const ctx=document.getElementById(id);if(!c
 
 function getFutureMonthTopMarkets(month,metric){
   const view=currentView||getFilteredView(),dest=view.dest;
-  const raw=dest?(payload.destinationFutureSourceMarket||[]).filter(r=>r.Destination===dest):(payload.futureSourceMarket||[]);
+  const raw=(dest?(payload.destinationFutureSourceMarket||[]).filter(r=>r.Destination===dest):(payload.futureSourceMarket||[])).filter(r=>!selectedStayYear||getRowStayYear(r)===selectedStayYear);
   const filtered=raw.filter(r=>String(r['Check-in Month']||'').slice(0,3)===String(month||'').slice(0,3));
   const byMarket={};
   filtered.forEach(r=>{const market=r['Source Market']||'Unknown';if(!byMarket[market])byMarket[market]={market,revenue:0,nights:0};byMarket[market].revenue+=numVal(r.Revenue);byMarket[market].nights+=numVal(r['Room Nights']);});
@@ -1416,7 +1444,7 @@ function computeRoomNightsInsight(rows){
   const total=rows.reduce((s,r)=>s+r.nights,0);
   if(!total)return'';
   const top=rows.slice().sort((a,b)=>b.nights-a.nights)[0],share=top.nights/total*100;
-  return'<b>'+top.month+'</b> carries the most room nights ahead at <b>'+formatNumber(top.nights)+'</b> ('+share.toFixed(0)+'% of total future room nights).';
+  return'<b>'+top.month+(top.year?' '+top.year:'')+'</b> carries the most room nights ahead at <b>'+formatNumber(top.nights)+'</b> ('+share.toFixed(0)+'% of total future room nights).';
 }
 function renderBehaviorCharts(view){
   const bltOrder=['0-3 Days','4-7 Days','8-14 Days','15-30 Days','30-60 Days','60+ Days'];
@@ -1468,16 +1496,16 @@ function applyMatrixHighlight(){
   });
 }
 function formatMatrixPeriodLabel(selected,allMonths){
-  if(!selected.length)return'Jan – Dec';
+  if(!selected.length)return'Jan – Dec'+(selectedStayYear?' '+selectedStayYear:'');
   const indices=selected.map(m=>allMonths.indexOf(m)).sort((a,b)=>a-b);
   let contiguous=true;
   for(let i=1;i<indices.length;i++){if(indices[i]!==indices[i-1]+1){contiguous=false;break;}}
-  if(contiguous&&indices.length>1)return allMonths[indices[0]]+' – '+allMonths[indices[indices.length-1]];
-  return indices.map(i=>allMonths[i]).join(', ');
+  if(contiguous&&indices.length>1)return allMonths[indices[0]]+' – '+allMonths[indices[indices.length-1]]+(selectedStayYear?' '+selectedStayYear:'');
+  return indices.map(i=>allMonths[i]).join(', ')+(selectedStayYear?' '+selectedStayYear:'');
 }
 function renderFutureGeoTable(view){
   const dest=view.dest,months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  let raw=dest?(payload.destinationFutureSourceMarket||[]).filter(r=>r.Destination===dest):(payload.futureSourceMarket||[]);
+  let raw=(dest?(payload.destinationFutureSourceMarket||[]).filter(r=>r.Destination===dest):(payload.futureSourceMarket||[])).filter(r=>!selectedStayYear||getRowStayYear(r)===selectedStayYear);
   const byMarket={};
   raw.forEach(r=>{const market=r['Source Market']||'Unknown',month=String(r['Check-in Month']||'').slice(0,3);if(!months.includes(month))return;if(!byMarket[market])byMarket[market]={market,totalRevenue:0,totalNights:0,totalBookings:0,months:{}};if(!byMarket[market].months[month])byMarket[market].months[month]={revenue:0,nights:0,bookings:0};const revenue=numVal(r.Revenue),nights=numVal(r['Room Nights']),bookings=numVal(r.Bookings);byMarket[market].months[month].revenue+=revenue;byMarket[market].months[month].nights+=nights;byMarket[market].months[month].bookings+=bookings;byMarket[market].totalRevenue+=revenue;byMarket[market].totalNights+=nights;byMarket[market].totalBookings+=bookings;});
   const isNights=matrixMetric==='nights';
@@ -1864,17 +1892,18 @@ function periodLabelForOnePager(dest, selectedMonths) {
 }
 
 const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-function nextCalendarMonthAbbrs(count) {
-  const startIdx = new Date().getMonth();
+function pipelinePeriodKey(year,month){ return String(year||'')+'-'+String(month||'').slice(0,3); }
+function pipelinePeriodLabel(period){ return String(period.month||'').slice(0,3)+' '+String(period.year||''); }
+function nextCalendarPeriods(count) {
+  const now=new Date(), startIdx=now.getMonth(), startYear=now.getFullYear();
   const out = [];
-  for (let i = 0; i < count; i++) out.push(MONTH_ABBR[(startIdx + i) % 12]);
+  for (let i=0;i<count;i++){const offset=startIdx+i;out.push({month:MONTH_ABBR[offset%12],year:String(startYear+Math.floor(offset/12))});}
   return out;
 }
 function nextPipelineMonths(futureRows, count) {
-  const abbrs = nextCalendarMonthAbbrs(count);
-  return abbrs.map(abbr => {
-    const match = futureRows.find(r => String(r.month || '').slice(0, 3) === abbr);
-    return match || { month: abbr, revenue: 0, nights: 0, bookings: 0 };
+  return nextCalendarPeriods(count).map(period => {
+    const match = futureRows.find(r => String(r.month || '').slice(0,3)===period.month && String(r.year||'')===period.year);
+    return match || { year:period.year, month:period.month, revenue:0, nights:0, bookings:0 };
   });
 }
 
@@ -1890,6 +1919,7 @@ function getHotelCountForView(dest, month) {
 
 let onePagerMode = 'destination';
 let onePagerPipelineMode = 'auto';
+let onePagerStayYear = '';
 let onePagerCustomPipelineMonths = [];
 let onePagerCustomPipelineDestinationsRevenue = [];
 let onePagerCustomPipelineDestinationsNights = [];
@@ -1900,8 +1930,8 @@ function getPipelineMonths(futureRows) {
   if (onePagerPipelineMode === 'custom' && onePagerCustomPipelineMonths.length) {
     const sorted = onePagerCustomPipelineMonths.slice().sort((a, b) => MONTH_ABBR.indexOf(a) - MONTH_ABBR.indexOf(b));
     return sorted.map(abbr => {
-      const match = futureRows.find(r => String(r.month || '').slice(0, 3) === abbr);
-      return match || { month: abbr, revenue: 0, nights: 0, bookings: 0 };
+      const match = futureRows.find(r => String(r.month||'').slice(0,3)===abbr && String(r.year||'')===String(onePagerStayYear||''));
+      return match || { year:String(onePagerStayYear||''), month:abbr, revenue:0, nights:0, bookings:0 };
     });
   }
   return nextPipelineMonths(futureRows, 3);
@@ -1940,39 +1970,41 @@ function combineRawByMonth(raw) {
 }
 
 function buildFutureHeatmapByDestination(market, upcoming3, fieldName, topN, explicitDestinations) {
-  const monthAbbrs = upcoming3.map(r => String(r.month || '').slice(0, 3));
+  const periods=upcoming3.map(r=>({key:pipelinePeriodKey(r.year,r.month),label:pipelinePeriodLabel(r)}));
+  const periodKeys=periods.map(p=>p.key);
   const raw = (payload.destinationFutureSourceMarket || []).filter(r => r['Source Market'] === market);
   const byDest = {};
   raw.forEach(r => {
     const month = String(r['Check-in Month'] || '').slice(0, 3);
-    if (!monthAbbrs.includes(month)) return;
+    const key=pipelinePeriodKey(getRowStayYear(r),month);
+    if (!periodKeys.includes(key)) return;
     const d = r.Destination || 'Unknown';
     if (!byDest[d]) byDest[d] = { market: d, total: 0, cells: {} };
     const val = numVal(r[fieldName]);
-    byDest[d].cells[month] = (byDest[d].cells[month] || 0) + val;
+    byDest[d].cells[key] = (byDest[d].cells[key] || 0) + val;
     byDest[d].total += val;
   });
   let allRows = Object.values(byDest);
   if (explicitDestinations && explicitDestinations.length) {
     allRows = allRows.filter(r => explicitDestinations.includes(r.market));
   }
-  const monthTotals = monthAbbrs.map(m => allRows.reduce((s, r) => s + (r.cells[m] || 0), 0));
+  const monthTotals = periodKeys.map(k => allRows.reduce((s, r) => s + (r.cells[k] || 0), 0));
   const grandTotal = monthTotals.reduce((s, v) => s + v, 0);
   const rows = allRows.sort((a, b) => b.total - a.total).slice(0, (explicitDestinations && explicitDestinations.length) ? explicitDestinations.length : (topN || 10));
   let maxCell = 1;
-  rows.forEach(r => monthAbbrs.forEach(m => { if ((r.cells[m] || 0) > maxCell) maxCell = r.cells[m]; }));
-  return { months: monthAbbrs, rows, maxCell, monthTotals, grandTotal, marketCount: allRows.length };
+  rows.forEach(r => periodKeys.forEach(k => { if ((r.cells[k] || 0) > maxCell) maxCell = r.cells[k]; }));
+  return { months:periodKeys, monthLabels:periods.map(p=>p.label), rows, maxCell, monthTotals, grandTotal, marketCount:allRows.length };
 }
 
 function getRankedPipelineDestinations(market, sortBy) {
   if (!market) return [];
   const upcoming3 = getPipelineMonths(futureRowsForMarket(market));
-  const monthAbbrs = upcoming3.map(r => String(r.month || '').slice(0, 3));
+  const periodKeys=upcoming3.map(r=>pipelinePeriodKey(r.year,r.month));
   const raw = (payload.destinationFutureSourceMarket || []).filter(r => r['Source Market'] === market);
   const byDest = {};
   raw.forEach(r => {
     const month = String(r['Check-in Month'] || '').slice(0, 3);
-    if (!monthAbbrs.includes(month)) return;
+    if (!periodKeys.includes(pipelinePeriodKey(getRowStayYear(r),month))) return;
     const d = r.Destination || 'Unknown';
     if (!byDest[d]) byDest[d] = { market: d, total: 0, nights: 0 };
     byDest[d].total += numVal(r.Revenue);
@@ -1986,11 +2018,11 @@ function futureRowsForMarket(market) {
   const raw = (payload.destinationFutureSourceMarket || []).filter(r => r['Source Market'] === market);
   const byMonth = {};
   raw.forEach(r => {
-    const m = r['Check-in Month'];
-    if (!byMonth[m]) byMonth[m] = { month: m, revenue: 0, nights: 0, bookings: 0 };
-    byMonth[m].revenue += numVal(r.Revenue);
-    byMonth[m].nights += numVal(r['Room Nights']);
-    byMonth[m].bookings += numVal(r.Bookings);
+    const m=r['Check-in Month'],year=getRowStayYear(r),key=pipelinePeriodKey(year,m);
+    if (!byMonth[key]) byMonth[key] = { year, month:m, revenue:0, nights:0, bookings:0 };
+    byMonth[key].revenue += numVal(r.Revenue);
+    byMonth[key].nights += numVal(r['Room Nights']);
+    byMonth[key].bookings += numVal(r.Bookings);
   });
   return Object.values(byMonth);
 }
@@ -2003,11 +2035,11 @@ function futureRowsForDestination(dest) {
   const raw = dest ? (payload.destinationFuturePipeline || []).filter(r => r.Destination === dest) : (payload.futurePipeline || []);
   const byMonth = {};
   raw.forEach(r => {
-    const m = r['Check-in Month'];
-    if (!byMonth[m]) byMonth[m] = { month: m, revenue: 0, nights: 0, bookings: 0 };
-    byMonth[m].revenue += numVal(r.Revenue);
-    byMonth[m].nights += numVal(r['Room Nights']);
-    byMonth[m].bookings += numVal(r.Bookings);
+    const m=r['Check-in Month'],year=getRowStayYear(r),key=pipelinePeriodKey(year,m);
+    if (!byMonth[key]) byMonth[key] = { year, month:m, revenue:0, nights:0, bookings:0 };
+    byMonth[key].revenue += numVal(r.Revenue);
+    byMonth[key].nights += numVal(r['Room Nights']);
+    byMonth[key].bookings += numVal(r.Bookings);
   });
   return Object.values(byMonth);
 }
@@ -2137,26 +2169,28 @@ function buildExtraStats(view, selectedMonths, sourceRows, entitySingular) {
 }
 
 function buildFutureHeatmap(dest, upcoming3, fieldName) {
-  const monthAbbrs = upcoming3.map(r => String(r.month || '').slice(0, 3));
+  const periods=upcoming3.map(r=>({key:pipelinePeriodKey(r.year,r.month),label:pipelinePeriodLabel(r)}));
+  const periodKeys=periods.map(p=>p.key);
   const raw = dest ? (payload.destinationFutureSourceMarket || []).filter(r => r.Destination === dest)
                    : (payload.futureSourceMarket || []);
   const byMarket = {};
   raw.forEach(r => {
     const month = String(r['Check-in Month'] || '').slice(0, 3);
-    if (!monthAbbrs.includes(month)) return;
+    const key=pipelinePeriodKey(getRowStayYear(r),month);
+    if (!periodKeys.includes(key)) return;
     const market = r['Source Market'] || 'Unknown';
     if (!byMarket[market]) byMarket[market] = { market, total: 0, cells: {} };
     const val = numVal(r[fieldName]);
-    byMarket[market].cells[month] = (byMarket[market].cells[month] || 0) + val;
+    byMarket[market].cells[key] = (byMarket[market].cells[key] || 0) + val;
     byMarket[market].total += val;
   });
   const allRows = Object.values(byMarket);
-  const monthTotals = monthAbbrs.map(m => allRows.reduce((s, r) => s + (r.cells[m] || 0), 0));
+  const monthTotals = periodKeys.map(k => allRows.reduce((s, r) => s + (r.cells[k] || 0), 0));
   const grandTotal = monthTotals.reduce((s, v) => s + v, 0);
   const rows = allRows.sort((a, b) => b.total - a.total).slice(0, 10);
   let maxCell = 1;
-  rows.forEach(r => monthAbbrs.forEach(m => { if ((r.cells[m] || 0) > maxCell) maxCell = r.cells[m]; }));
-  return { months: monthAbbrs, rows, maxCell, monthTotals, grandTotal, marketCount: allRows.length };
+  rows.forEach(r => periodKeys.forEach(k => { if ((r.cells[k] || 0) > maxCell) maxCell = r.cells[k]; }));
+  return { months:periodKeys, monthLabels:periods.map(p=>p.label), rows, maxCell, monthTotals, grandTotal, marketCount:allRows.length };
 }
 
 function opRankTableHtml(rows, valueKey, formatFn, valueLabel, showFlag, entityHeader, grandTotals, allCount, entityLabelPlural) {
@@ -2192,7 +2226,7 @@ function opRankTableHtml(rows, valueKey, formatFn, valueLabel, showFlag, entityH
 function opFutureHeatmapHtml(heatmap, formatFn, showFlag, entityHeader, entityLabelPlural) {
   if (!heatmap.rows.length) return '<div class="op-headline2">No future pipeline data for this selection.</div>';
   const entityLower = (entityLabelPlural || 'markets').toLowerCase();
-  const headCells = heatmap.months.map(m => '<th>' + escapeHtml(m) + '</th>').join('');
+  const headCells = heatmap.months.map((m,i) => '<th>' + escapeHtml((heatmap.monthLabels||[])[i]||m) + '</th>').join('');
   const bodyRows = heatmap.rows.map((r, i) => {
     const cells = heatmap.months.map(m => {
       const val = r.cells[m] || 0;
@@ -2426,9 +2460,13 @@ function renderOnePagerSetup() {
   const pipelineMonthChips = MONTH_ABBR.map(abbr =>
     '<button type="button" class="op-month-chip' + (onePagerCustomPipelineMonths.includes(abbr) ? ' selected' : '') + '" onclick="toggleOpPipelineMonth(\'' + abbr + '\')">' + abbr + '</button>'
   ).join('');
+  const stayYears=getAvailableStayYears();
+  if(!onePagerStayYear||!stayYears.includes(onePagerStayYear))onePagerStayYear=selectedStayYear||(stayYears[0]||'');
+  const pipelineYearOptions=stayYears.map(y=>'<option value="'+escapeAttr(y)+'"'+(y===onePagerStayYear?' selected':'')+'>'+escapeHtml(y)+'</option>').join('');
+  const autoPeriodLabels=nextCalendarPeriods(3).map(pipelinePeriodLabel);
   const pipelineSummary = onePagerPipelineMode === 'custom'
-    ? (onePagerCustomPipelineMonths.length ? onePagerCustomPipelineMonths.slice().sort((a, b) => MONTH_ABBR.indexOf(a) - MONTH_ABBR.indexOf(b)).join(', ') : 'Pick at least 1 month')
-    : 'Auto (next 3 months from today)';
+    ? (onePagerCustomPipelineMonths.length ? onePagerCustomPipelineMonths.slice().sort((a, b) => MONTH_ABBR.indexOf(a) - MONTH_ABBR.indexOf(b)).map(m=>m+' '+onePagerStayYear).join(', ') : 'Pick at least 1 month')
+    : 'Auto ('+autoPeriodLabels.join(', ')+')';
 
   const buildDestPicker = (family, metric, stepNum, label, hint) => (onePagerMode === 'market' && onePagerEntity) ? (function () {
     const ranked = family === 'snapshot' ? getRankedSnapshotDestinations(onePagerEntity, metric) : getRankedPipelineDestinations(onePagerEntity, metric);
@@ -2498,7 +2536,7 @@ function renderOnePagerSetup() {
           '<button type="button" class="op-mode-btn' + (onePagerPipelineMode === 'custom' ? ' selected' : '') + '" onclick="setOpPipelineMode(\'custom\')">' +
             '<div class="op-mode-btn-title">Choose Months</div><div class="op-mode-btn-sub">Pick the months yourself</div></button>' +
         '</div>' +
-        (onePagerPipelineMode === 'custom' ? '<div class="op-month-chip-grid">' + pipelineMonthChips + '</div>' : '') +
+        (onePagerPipelineMode === 'custom' ? '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><label for="opPipelineStayYear" style="font-size:11px;font-weight:800;color:var(--muted)">Stay Year</label><select id="opPipelineStayYear" onchange="setOpPipelineStayYear(this.value)" style="padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:#fff">'+pipelineYearOptions+'</select></div><div class="op-month-chip-grid">' + pipelineMonthChips + '</div>' : '') +
       '</div>' +
       snapshotRevenueSection +
       snapshotNightsSection +
@@ -2513,6 +2551,13 @@ function renderOnePagerSetup() {
 }
 function setOpPipelineMode(mode) {
   onePagerPipelineMode = mode;
+  resetOpDestinationPickers();
+  renderOnePagerSetup();
+}
+
+function setOpPipelineStayYear(year){
+  onePagerStayYear=String(year||'');
+  onePagerCustomPipelineMonths=[];
   resetOpDestinationPickers();
   renderOnePagerSetup();
 }
