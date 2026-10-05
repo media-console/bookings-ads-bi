@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!-- Lead V11 UTM Fast Submit: no Page URL, captures UTM fields -->
-<!-- GitHub Pages version: google.script.run replaced with fetch() -->
+<!-- Internal BI: Apps Script same-origin transport with JSONP fallback -->
 <html>
 <head>
   <meta charset="UTF-8">
@@ -632,18 +632,9 @@ function initCoverVisibility(){
   if(btn)btn.textContent=hidden?'Show Cover':'Hide Cover';
 }
 function loadViaJsonp() {
-  const callbackName = 'gasCallback_' + Date.now();
-  const script = document.createElement('script');
-
-  window[callbackName] = function(res) {
-    delete window[callbackName];
-    document.body.removeChild(script);
+  loadPayloadReliably().then(function(loadedPayload) {
     try {
-      if (!res || !res.ok) {
-        showLoadError('Backend error: ' + (res && res.message ? res.message : 'Unknown error'));
-        return;
-      }
-      payload = res.payload || {};
+      payload = loadedPayload || {};
       applyContent();
       setupFilters();
       initCoverVisibility();
@@ -654,14 +645,230 @@ function loadViaJsonp() {
     } catch (err) {
       showLoadError('Render error: ' + err.message);
     }
-  };
+  }).catch(function(err) {
+    showLoadError('Failed to load data. ' + (err && err.message ? err.message : 'Please try again.'));
+  });
+}
 
-  script.onerror = function() {
-    showLoadError('Failed to load data. Please try again.');
-  };
+const BI_CACHE_DB = 'mc-bookings-bi';
+const BI_CACHE_STORE = 'payloads';
+const BI_CACHE_KEY = 'internal-live-v18';
 
-  script.src = GAS_URL + '?action=getClientPayload&callback=' + callbackName;
-  document.body.appendChild(script);
+function openBiCache() {
+  return new Promise(function(resolve, reject) {
+    if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
+    const req = indexedDB.open(BI_CACHE_DB, 1);
+    req.onupgradeneeded = function() {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(BI_CACHE_STORE)) db.createObjectStore(BI_CACHE_STORE);
+    };
+    req.onsuccess = function(){ resolve(req.result); };
+    req.onerror = function(){ reject(req.error || new Error('Cache unavailable')); };
+  });
+}
+
+function readBiCache() {
+  return openBiCache().then(function(db){
+    return new Promise(function(resolve, reject){
+      const tx=db.transaction(BI_CACHE_STORE,'readonly');
+      const req=tx.objectStore(BI_CACHE_STORE).get(BI_CACHE_KEY);
+      req.onsuccess=function(){resolve(req.result||null);};
+      req.onerror=function(){reject(req.error);};
+      tx.oncomplete=function(){db.close();};
+    });
+  }).catch(function(){ return null; });
+}
+
+function writeBiCache(record) {
+  return openBiCache().then(function(db){
+    return new Promise(function(resolve, reject){
+      const tx=db.transaction(BI_CACHE_STORE,'readwrite');
+      tx.objectStore(BI_CACHE_STORE).put(record,BI_CACHE_KEY);
+      tx.oncomplete=function(){db.close();resolve();};
+      tx.onerror=function(){db.close();reject(tx.error);};
+    });
+  }).catch(function(){});
+}
+
+function setLoadingProgress(message) {
+  const el=document.getElementById('loading');
+  if(el) el.innerHTML='<div style="font-weight:700;color:#4a5568">'+escapeHtml(message)+'</div>';
+}
+
+function loadPayloadReliably() {
+  return readBiCache().then(function(cached){
+    setLoadingProgress('Connecting to booking data…');
+    return dataRequest('getClientPayloadManifest',{}, {attempts:4,timeoutMs:45000})
+      .then(function(manifest){
+        const cacheMatches=cached&&cached.payload&&String(cached.version||'')===String(manifest.version||'')&&String(cached.generatedAt||'')===String(manifest.generatedAt||'')&&Number(cached.expectedLength||0)===Number(manifest.expectedLength||0);
+        if(cacheMatches) return cached.payload;
+        return loadPayloadInBatches(manifest).then(function(fresh){
+          writeBiCache({version:manifest.version,generatedAt:manifest.generatedAt,expectedLength:manifest.expectedLength,payload:fresh,savedAt:Date.now()});
+          return fresh;
+        });
+      })
+      .catch(function(err){
+        if(cached&&cached.payload) return cached.payload;
+        throw err;
+      });
+  });
+}
+
+function jsonpRequest(params, options) {
+  options = options || {};
+  const maxAttempts = options.attempts || 3;
+  const timeoutMs = options.timeoutMs || 20000;
+
+  return new Promise(function(resolve, reject) {
+    function run(attempt) {
+      const callbackName = 'gasChunkCb_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+      const script = document.createElement('script');
+      let finished = false;
+      let timer = null;
+
+      function cleanup() {
+        if (script.parentNode) script.parentNode.removeChild(script);
+        window[callbackName] = function() {};
+        setTimeout(function(){ try { delete window[callbackName]; } catch(e) {} }, 60000);
+      }
+
+      function retryOrReject(message) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        cleanup();
+        if (attempt < maxAttempts) {
+          setTimeout(function(){ run(attempt + 1); }, 600 * attempt);
+        } else {
+          reject(new Error(message));
+        }
+      }
+
+      window[callbackName] = function(res) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        cleanup();
+        if (!res || !res.ok) {
+          if (attempt < maxAttempts) {
+            setTimeout(function(){ run(attempt + 1); }, 600 * attempt);
+          } else {
+            reject(new Error(res && res.message ? res.message : 'Backend returned an invalid response.'));
+          }
+          return;
+        }
+        resolve(res);
+      };
+
+      script.onerror = function() {
+        retryOrReject('The data connection was interrupted.');
+      };
+
+      const query = Object.keys(params).map(function(key){
+        return encodeURIComponent(key) + '=' + encodeURIComponent(params[key]);
+      });
+      query.push('callback=' + encodeURIComponent(callbackName));
+      query.push('_=' + Date.now() + attempt);
+      script.src = GAS_URL + '?' + query.join('&');
+      timer = setTimeout(function(){
+        retryOrReject('The data request timed out.');
+      }, timeoutMs);
+      document.body.appendChild(script);
+    }
+    run(1);
+  });
+}
+
+function appsScriptRequest(method, params, options) {
+  options = options || {};
+  const maxAttempts = options.attempts || 3;
+  const timeoutMs = options.timeoutMs || 20000;
+
+  return new Promise(function(resolve, reject) {
+    function run(attempt) {
+      let finished = false;
+      const timer = setTimeout(function(){
+        if (finished) return;
+        finished = true;
+        if (attempt < maxAttempts) setTimeout(function(){ run(attempt + 1); }, 600 * attempt);
+        else reject(new Error('The data request timed out.'));
+      }, timeoutMs);
+
+      function success(res) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        if (!res || !res.ok) {
+          if (attempt < maxAttempts) setTimeout(function(){ run(attempt + 1); }, 600 * attempt);
+          else reject(new Error(res && res.message ? res.message : 'Backend returned an invalid response.'));
+          return;
+        }
+        resolve(res);
+      }
+
+      function failure(err) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        if (attempt < maxAttempts) setTimeout(function(){ run(attempt + 1); }, 600 * attempt);
+        else reject(new Error(err && err.message ? err.message : 'The Apps Script connection failed.'));
+      }
+
+      const runner = google.script.run.withSuccessHandler(success).withFailureHandler(failure);
+      if (method === 'getClientPayloadManifest') runner.getClientPayloadManifest();
+      else if (method === 'getClientPayloadBatch') runner.getClientPayloadBatch(params.start, params.count);
+      else failure(new Error('Unknown Apps Script method.'));
+    }
+    run(1);
+  });
+}
+
+function dataRequest(method, params, options) {
+  if (window.google && google.script && google.script.run) {
+    return appsScriptRequest(method, params || {}, options);
+  }
+  const jsonpParams = Object.assign({action:method}, params || {});
+  return jsonpRequest(jsonpParams, options);
+}
+
+function loadPayloadInBatches(existingManifest) {
+  const batchSize = 20;
+  const maxParallel = 1;
+
+  const manifestPromise=existingManifest?Promise.resolve(existingManifest):dataRequest('getClientPayloadManifest', {}, {attempts:4,timeoutMs:45000});
+  return manifestPromise.then(function(manifest) {
+    const total = Number(manifest.chunkCount || 0);
+    const expectedLength = Number(manifest.expectedLength || 0);
+    if (!total || !expectedLength) throw new Error('Dashboard payload is unavailable. Please rebuild the BI data.');
+
+    const jobs = [];
+    for (let start = 0; start < total; start += batchSize) {
+      jobs.push({start:start,count:Math.min(batchSize,total-start)});
+    }
+    const results = new Array(jobs.length);
+    let nextJob = 0;
+
+    function worker() {
+      if (nextJob >= jobs.length) return Promise.resolve();
+      const jobIndex = nextJob++;
+      const job = jobs[jobIndex];
+      setLoadingProgress('Loading booking data… '+Math.min(100,Math.round(job.start/total*100))+'%');
+      return dataRequest('getClientPayloadBatch',{start:job.start,count:job.count},{attempts:4,timeoutMs:60000})
+        .then(function(res){
+          if (Number(res.start) !== job.start) throw new Error('Received an unexpected payload batch.');
+          results[jobIndex] = res.data || '';
+        }).then(worker);
+    }
+
+    const workers = [];
+    for (let i=0;i<Math.min(maxParallel,jobs.length);i++) workers.push(worker());
+    return Promise.all(workers).then(function() {
+      const json = results.join('');
+      if (json.length !== expectedLength) throw new Error('The downloaded data was incomplete.');
+      try { setLoadingProgress('Preparing dashboard…'); return JSON.parse(json); }
+      catch (err) { throw new Error('The downloaded data could not be read.'); }
+    });
+  });
 }
 
 function showLoadError(message) {
