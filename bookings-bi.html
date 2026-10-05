@@ -832,8 +832,10 @@ function dataRequest(method, params, options) {
 }
 
 function loadPayloadInBatches(existingManifest) {
-  const batchSize = 20;
-  const maxParallel = 1;
+  // Small JSONP responses are substantially more reliable across the
+  // authenticated Apps Script → GitHub Pages boundary.
+  const batchSize = 2;
+  const maxParallel = 2;
 
   const manifestPromise=existingManifest?Promise.resolve(existingManifest):dataRequest('getClientPayloadManifest', {}, {attempts:4,timeoutMs:45000});
   return manifestPromise.then(function(manifest) {
