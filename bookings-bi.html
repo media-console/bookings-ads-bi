@@ -684,10 +684,10 @@ function writeBiCache(record) {
     return new Promise(function(resolve, reject){
       const tx=db.transaction(BI_CACHE_STORE,'readwrite');
       tx.objectStore(BI_CACHE_STORE).put(record,BI_CACHE_KEY);
-      tx.oncomplete=function(){db.close();resolve();};
+      tx.oncomplete=function(){db.close();resolve(true);};
       tx.onerror=function(){db.close();reject(tx.error);};
     });
-  }).catch(function(){});
+  }).catch(function(){ return false; });
 }
 
 function setLoadingProgress(message) {
@@ -697,21 +697,49 @@ function setLoadingProgress(message) {
 
 function loadPayloadReliably() {
   return readBiCache().then(function(cached){
+    // Cached copy exists: show it immediately, then check for newer data in the background.
+    if (cached && cached.payload) {
+      refreshBiCacheInBackground(cached);
+      return cached.payload;
+    }
+    // First visit on this browser: download everything.
     setLoadingProgress('Connecting to booking data…');
     return dataRequest('getClientPayloadManifest',{}, {attempts:4,timeoutMs:45000})
       .then(function(manifest){
-        const cacheMatches=cached&&cached.payload&&String(cached.version||'')===String(manifest.version||'')&&String(cached.generatedAt||'')===String(manifest.generatedAt||'')&&Number(cached.expectedLength||0)===Number(manifest.expectedLength||0);
-        if(cacheMatches) return cached.payload;
         return loadPayloadInBatches(manifest).then(function(fresh){
           writeBiCache({version:manifest.version,generatedAt:manifest.generatedAt,expectedLength:manifest.expectedLength,payload:fresh,savedAt:Date.now()});
           return fresh;
         });
-      })
-      .catch(function(err){
-        if(cached&&cached.payload) return cached.payload;
-        throw err;
       });
   });
+}
+
+function refreshBiCacheInBackground(cached) {
+  dataRequest('getClientPayloadManifest',{}, {attempts:2,timeoutMs:45000})
+    .then(function(manifest){
+      const same=String(cached.version||'')===String(manifest.version||'')&&String(cached.generatedAt||'')===String(manifest.generatedAt||'')&&Number(cached.expectedLength||0)===Number(manifest.expectedLength||0);
+      if (same) return;
+      return loadPayloadInBatches(manifest).then(function(fresh){
+        return writeBiCache({version:manifest.version,generatedAt:manifest.generatedAt,expectedLength:manifest.expectedLength,payload:fresh,savedAt:Date.now()})
+          .then(function(saved){ if (saved) showDataUpdateBanner(); });
+      });
+    })
+    .catch(function(){ /* keep showing the cached data */ });
+}
+
+function showDataUpdateBanner() {
+  if (document.getElementById('dataUpdateBanner')) return;
+  const bar=document.createElement('div');
+  bar.id='dataUpdateBanner';
+  bar.style.cssText='position:fixed;right:20px;bottom:20px;z-index:99999;background:#111827;color:#fff;padding:12px 16px;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.25);font:600 13px Inter,system-ui,sans-serif;display:flex;align-items:center;gap:12px';
+  const msg=document.createElement('span');
+  msg.textContent='New booking data is available.';
+  const btn=document.createElement('button');
+  btn.textContent='Reload';
+  btn.style.cssText='background:#2447ff;color:#fff;border:0;border-radius:8px;padding:6px 12px;font:700 13px inherit;cursor:pointer';
+  btn.onclick=function(){ location.reload(); };
+  bar.appendChild(msg); bar.appendChild(btn);
+  document.body.appendChild(bar);
 }
 
 function jsonpRequest(params, options) {
