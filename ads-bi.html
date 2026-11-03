@@ -1106,7 +1106,7 @@ function startOfMonth(d){ return new Date(d.getFullYear(), d.getMonth(), 1); }
 function endOfMonth(d){ return new Date(d.getFullYear(), d.getMonth()+1, 0); }
 
 const presets = [
-  {key:'alltime', label:'All Time', range:()=>[new Date(2020,0,1), new Date(2030,11,31)]},
+  {key:'alltime', label:'All Time', range:()=>[new Date(2026,0,1), TODAY]},
   {key:'today', label:'Today', range:()=>[TODAY, TODAY]},
   {key:'yesterday', label:'Yesterday', range:()=>[addDays(TODAY,-1), addDays(TODAY,-1)]},
   {key:'last7', label:'Last 7 Days', range:()=>[addDays(TODAY,-6), TODAY]},
@@ -1117,8 +1117,8 @@ const presets = [
   {key:'custom', label:'Custom', range:()=>[dateRangeStart, dateRangeEnd]},
 ];
 
-let dateRangeStart = new Date(2020,0,1);
-let dateRangeEnd = new Date(2030,11,31);
+let dateRangeStart = new Date(2026,0,1);
+let dateRangeEnd = TODAY;
 let activePreset = 'alltime';
 let calRefMonth = new Date(); // left calendar month
 let pendingPick = null;
